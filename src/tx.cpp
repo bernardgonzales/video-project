@@ -1,16 +1,16 @@
 /**
- * tx.cpp - GStreamer RTP Transmitter (Loopback Test)
+ * tx.cpp - GStreamer RTP Transmitter (Webcam)
  *
- * Reads an H264 video file, wraps it in RTP, and sends over UDP to localhost.
+ * Captures from a V4L2 webcam, encodes to H264, wraps in RTP, and sends over UDP.
  *
  * Pipeline:
- *   filesrc → qtdemux → h264parse → rtph264pay → udpsink
+ *   v4l2src → capsfilter (YUY2 640x480 30fps) → videoconvert → capsfilter (I420) → x264enc → rtph264pay → udpsink
  *
  * Build:
  *   g++ tx.cpp -o tx $(pkg-config --cflags --libs gstreamer-1.0)
  *
  * Run:
- *   ./tx video.mp4
+ *   ./tx [/dev/videoN]   (defaults to /dev/video0)
  */
 
 #include <gst/gst.h>
@@ -21,31 +21,9 @@
 #define TX_PORT  5000
 #define RTP_PT   96
 
-// qtdemux has a dynamic src pad — link it to h264parse when the video pad appears
-static void on_pad_added(GstElement*, GstPad *pad, gpointer data)
-{
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    const gchar *name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
-    gst_caps_unref(caps);
-
-    if (!g_str_has_prefix(name, "video/x-h264"))
-        return;
-
-    GstElement *parser = (GstElement *)data;
-    GstPad *sinkpad = gst_element_get_static_pad(parser, "sink");
-    if (!gst_pad_is_linked(sinkpad))
-        gst_pad_link(pad, sinkpad);
-    gst_object_unref(sinkpad);
-}
-
 int main(int argc, char *argv[])
 {
-    if (argc < 2) {
-        std::cerr << "Usage: ./tx <path_to_video.mp4>" << std::endl;
-        return -1;
-    }
-
-    std::string filepath = argv[1];
+    std::string device = (argc >= 2) ? argv[1] : "/dev/video0";
 
     // -------------------------------------------------------------------------
     // Initialize GStreamer
@@ -57,16 +35,18 @@ int main(int argc, char *argv[])
     // -------------------------------------------------------------------------
     // Create pipeline elements
     // -------------------------------------------------------------------------
-    GstElement *pipeline = gst_pipeline_new("tx-pipeline");
-    GstElement *source   = gst_element_factory_make("filesrc",      "source");
-    GstElement *demux    = gst_element_factory_make("qtdemux",      "demux");
-    GstElement *parser   = gst_element_factory_make("h264parse",    "parser");
-    GstElement *pay      = gst_element_factory_make("rtph264pay",   "pay");
-    GstElement *sink     = gst_element_factory_make("udpsink",      "sink");
+    GstElement *pipeline  = gst_pipeline_new("tx-pipeline");
+    GstElement *source    = gst_element_factory_make("v4l2src",      "source");
+    GstElement *capsfilter= gst_element_factory_make("capsfilter",   "capsfilter");
+    GstElement *convert   = gst_element_factory_make("videoconvert", "convert");
+    GstElement *encfilter = gst_element_factory_make("capsfilter",   "encfilter");
+    GstElement *encoder   = gst_element_factory_make("x264enc",      "encoder");
+    GstElement *pay       = gst_element_factory_make("rtph264pay",   "pay");
+    GstElement *sink      = gst_element_factory_make("udpsink",      "sink");
 
-    if (!pipeline || !source || !demux || !parser || !pay || !sink) {
+    if (!pipeline || !source || !capsfilter || !convert || !encfilter || !encoder || !pay || !sink) {
         std::cerr << "[TX] ERROR: Failed to create one or more elements." << std::endl;
-        std::cerr << "[TX] Make sure gstreamer1.0-plugins-good is installed." << std::endl;
+        std::cerr << "[TX] Make sure gstreamer1.0-plugins-good and gstreamer1.0-plugins-ugly are installed." << std::endl;
         return -1;
     }
 
@@ -74,39 +54,56 @@ int main(int argc, char *argv[])
     // Configure elements
     // -------------------------------------------------------------------------
 
-    // filesrc: point to the input video file
-    g_object_set(source, "location", filepath.c_str(), NULL);
+    // v4l2src: webcam device
+    g_object_set(source, "device", device.c_str(), NULL);
+
+    // capsfilter: pin format so caps negotiation doesn't stall
+    GstCaps *caps = gst_caps_new_simple("video/x-raw",
+        "format",    G_TYPE_STRING, "YUY2",
+        "width",     G_TYPE_INT,    640,
+        "height",    G_TYPE_INT,    480,
+        "framerate", GST_TYPE_FRACTION, 30, 1,
+        NULL);
+    g_object_set(capsfilter, "caps", caps, NULL);
+    gst_caps_unref(caps);
+
+    // encfilter: force I420 so x264enc uses the standard 4:2:0 high profile;
+    // without this, videoconvert picks Y42B (4:2:2) which x264enc silently drops
+    GstCaps *i420 = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "I420",
+        NULL);
+    g_object_set(encfilter, "caps", i420, NULL);
+    gst_caps_unref(i420);
+
+    // x264enc: zero-latency preset for live streaming; frequent keyframes so the
+    // receiver can start decoding within ~2 seconds of connecting
+    g_object_set(encoder, "tune",        0x00000004 /* zerolatency */, NULL);
+    g_object_set(encoder, "speed-preset", 1 /* ultrafast */,           NULL);
+    g_object_set(encoder, "key-int-max",  60,                          NULL);
 
     // rtph264pay: set payload type and send SPS/PPS with every keyframe
     g_object_set(pay, "pt", RTP_PT, NULL);
     g_object_set(pay, "config-interval", -1, NULL);
 
     // udpsink: send to localhost on TX_PORT
-    g_object_set(sink, "host", TX_HOST, NULL);
-    g_object_set(sink, "port", TX_PORT, NULL);
-    g_object_set(sink, "sync", TRUE, NULL);  // sync to clock so we don't blast too fast
+    // sync=FALSE, async=FALSE: live sources won't preroll, so don't let the sink
+    // block the PAUSED→PLAYING transition waiting for a buffer that never comes
+    g_object_set(sink, "host",  TX_HOST, NULL);
+    g_object_set(sink, "port",  TX_PORT, NULL);
+    g_object_set(sink, "sync",  FALSE,   NULL);
+    g_object_set(sink, "async", FALSE,   NULL);
 
     std::cout << "[TX] Sending to " << TX_HOST << ":" << TX_PORT << std::endl;
-    std::cout << "[TX] Source file: " << filepath << std::endl;
+    std::cout << "[TX] Webcam device: " << device << std::endl;
 
     // -------------------------------------------------------------------------
     // Add elements to pipeline and link
     // -------------------------------------------------------------------------
-    gst_bin_add_many(GST_BIN(pipeline), source, demux, parser, pay, sink, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), source, capsfilter, convert, encfilter, encoder, pay, sink, NULL);
 
-    // filesrc → qtdemux (static link)
-    if (!gst_element_link(source, demux)) {
-        std::cerr << "[TX] ERROR: Failed to link filesrc → qtdemux." << std::endl;
-        gst_object_unref(pipeline);
-        return -1;
-    }
-
-    // qtdemux → h264parse (dynamic pad, handled in callback)
-    g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), parser);
-
-    // h264parse → rtph264pay → udpsink (static link)
-    if (!gst_element_link_many(parser, pay, sink, NULL)) {
-        std::cerr << "[TX] ERROR: Failed to link parser → pay → sink." << std::endl;
+    // v4l2src → capsfilter → videoconvert → encfilter → x264enc → rtph264pay → udpsink
+    if (!gst_element_link_many(source, capsfilter, convert, encfilter, encoder, pay, sink, NULL)) {
+        std::cerr << "[TX] ERROR: Failed to link pipeline elements." << std::endl;
         gst_object_unref(pipeline);
         return -1;
     }
@@ -140,7 +137,7 @@ int main(int argc, char *argv[])
         switch (GST_MESSAGE_TYPE(msg)) {
 
             case GST_MESSAGE_EOS:
-                std::cout << "[TX] End of stream reached." << std::endl;
+                std::cout << "[TX] Unexpected EOS." << std::endl;
                 gst_message_unref(msg);
                 goto cleanup;
 

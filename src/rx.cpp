@@ -70,9 +70,7 @@ static std::vector<std::string> load_class_names(const std::string &path)
 }
 
 // Run YOLOv4 darknet inference on `frame` (BGR) and draw results in-place.
-static void run_yolo(cv::dnn::Net &net,
-                     const std::vector<std::string> &class_names,
-                     cv::Mat &frame)
+static void run_yolo(cv::dnn::Net &net, const std::vector<std::string> &class_names, cv::Mat &frame)
 {
     const int orig_w = frame.cols;
     const int orig_h = frame.rows;
@@ -93,7 +91,9 @@ static void run_yolo(cv::dnn::Net &net,
     std::vector<float>    scores;
     std::vector<int>      class_ids;
 
-    for (const cv::Mat &out : raw_outputs) {
+    // Filter and draw
+    for (const cv::Mat &out : raw_outputs) 
+    {
         const auto *data = reinterpret_cast<const float *>(out.data);
         for (int i = 0; i < out.rows; i++, data += out.cols) {
             float obj_conf = data[4];
@@ -183,10 +183,19 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // udpsrc: listen port + RTP caps
+    // udpsrc: listen port + RTP caps + large socket buffer to absorb high-res frame bursts
     GstCaps *rtp_caps = gst_caps_from_string(RTP_CAPS);
-    g_object_set(source, "port", RX_PORT, "caps", rtp_caps, NULL);
+    g_object_set(source, "port", RX_PORT, "caps", rtp_caps,
+                 "buffer-size", 4 * 1024 * 1024,   // 4 MB socket receive buffer
+                 NULL);
     gst_caps_unref(rtp_caps);
+
+    // queue: enough room for several large frames worth of RTP packets
+    g_object_set(queue,
+                 "max-size-buffers", 0,
+                 "max-size-bytes",   8 * 1024 * 1024,   // 8 MB
+                 "max-size-time",    0,
+                 NULL);
 
     // Force BGR so we can wrap the buffer directly in cv::Mat
     GstCaps *bgr_caps = gst_caps_from_string("video/x-raw,format=BGR");
