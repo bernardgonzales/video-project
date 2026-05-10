@@ -1,6 +1,8 @@
 CXX      = g++
-CXXFLAGS = $(shell pkg-config --cflags gstreamer-1.0) -Wall -std=c++17
-LDFLAGS  = $(shell pkg-config --libs gstreamer-1.0)
+# opencv4 is the pkg-config name on Ubuntu 20+; use opencv on older distros
+OPENCV   = $(shell pkg-config --exists opencv4 && echo opencv4 || echo opencv)
+CXXFLAGS = $(shell pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 $(OPENCV)) -Wall -std=c++17
+LDFLAGS  = $(shell pkg-config --libs gstreamer-1.0 gstreamer-app-1.0 $(OPENCV))
 
 all: bin/tx bin/rx
 
