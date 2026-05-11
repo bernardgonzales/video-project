@@ -44,7 +44,8 @@ int main(int argc, char *argv[])
     GstElement *pay       = gst_element_factory_make("rtph264pay",   "pay");
     GstElement *sink      = gst_element_factory_make("udpsink",      "sink");
 
-    if (!pipeline || !source || !capsfilter || !convert || !encfilter || !encoder || !pay || !sink) {
+    if (!pipeline || !source || !capsfilter || !convert || !encfilter || !encoder || !pay || !sink) 
+    {
         std::cerr << "[TX] ERROR: Failed to create one or more elements." << std::endl;
         std::cerr << "[TX] Make sure gstreamer1.0-plugins-good and gstreamer1.0-plugins-ugly are installed." << std::endl;
         return -1;
@@ -102,7 +103,8 @@ int main(int argc, char *argv[])
     gst_bin_add_many(GST_BIN(pipeline), source, capsfilter, convert, encfilter, encoder, pay, sink, NULL);
 
     // v4l2src → capsfilter → videoconvert → encfilter → x264enc → rtph264pay → udpsink
-    if (!gst_element_link_many(source, capsfilter, convert, encfilter, encoder, pay, sink, NULL)) {
+    if (!gst_element_link_many(source, capsfilter, convert, encfilter, encoder, pay, sink, NULL)) 
+    {
         std::cerr << "[TX] ERROR: Failed to link pipeline elements." << std::endl;
         gst_object_unref(pipeline);
         return -1;
@@ -112,7 +114,8 @@ int main(int argc, char *argv[])
     // Start the pipeline
     // -------------------------------------------------------------------------
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
+    if (ret == GST_STATE_CHANGE_FAILURE) 
+    {
         std::cerr << "[TX] ERROR: Failed to set pipeline to PLAYING." << std::endl;
         gst_object_unref(pipeline);
         return -1;
@@ -125,7 +128,8 @@ int main(int argc, char *argv[])
     // -------------------------------------------------------------------------
     GstBus *bus = gst_element_get_bus(pipeline);
 
-    while (true) {
+    while (true) 
+    {
         GstMessage *msg = gst_bus_timed_pop_filtered(
             bus,
             100 * GST_MSECOND,
@@ -134,14 +138,15 @@ int main(int argc, char *argv[])
 
         if (msg == NULL) continue;
 
-        switch (GST_MESSAGE_TYPE(msg)) {
-
+        switch (GST_MESSAGE_TYPE(msg)) 
+        {
             case GST_MESSAGE_EOS:
                 std::cout << "[TX] Unexpected EOS." << std::endl;
                 gst_message_unref(msg);
                 goto cleanup;
 
-            case GST_MESSAGE_ERROR: {
+            case GST_MESSAGE_ERROR: 
+            {
                 GError *err = NULL;
                 gchar  *dbg = NULL;
                 gst_message_parse_error(msg, &err, &dbg);
@@ -155,8 +160,10 @@ int main(int argc, char *argv[])
                 goto cleanup;
             }
 
-            case GST_MESSAGE_STATE_CHANGED: {
-                if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) {
+            case GST_MESSAGE_STATE_CHANGED: 
+            {
+                if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) 
+                {
                     GstState old_state, new_state;
                     gst_message_parse_state_changed(msg, &old_state, &new_state, NULL);
                     std::cout << "[TX] State: "
